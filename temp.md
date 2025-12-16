@@ -1,5 +1,6 @@
 import base64
 import csv
+import gzip
 import json
 import os
 from pathlib import Path
@@ -11,11 +12,14 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 # 1. Paste your Base64 encoded 32-byte encryption key here (from config.yaml)
 ENCRYPTION_KEY = "YOUR_BASE64_KEY_HERE"
 
-# 2. Path to a specific .jsonl file or a directory containing logs
+# 2. Path to a specific log file or a directory containing logs
 INPUT_PATH = "logs/"
 
 # 3. Output CSV file path
 OUTPUT_FILE = "decrypted_logs.csv"
+
+# 4. Compression algorithm used in config.yaml (options: "none", "gzip")
+COMPRESSION_ALGORITHM = "gzip"
 # =================================================
 
 def decrypt_data(encrypted_data: str, key_bytes: bytes) -> Any:
@@ -47,38 +51,49 @@ def process_log_file(file_path: Path, key_bytes: bytes) -> List[Dict[str, Any]]:
     rows = []
     print(f"Processing {file_path}...")
     
-    with open(file_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            
-            try:
-                entry = json.loads(line)
-                
-                # Decrypt specific fields if they exist
-                if entry.get("request_body"):
-                    entry["request_body"] = decrypt_data(entry["request_body"], key_bytes)
-                
-                if entry.get("response_body"):
-                    entry["response_body"] = decrypt_data(entry["response_body"], key_bytes)
+    # Select the correct opener based on configuration
+    if COMPRESSION_ALGORITHM == "gzip":
+        open_func = gzip.open
+        mode = 'rt' # Read Text mode (handles decoding)
+    else:
+        open_func = open
+        mode = 'r'
 
-                # Flatten for CSV
-                row = {
-                    "timestamp": entry.get("timestamp"),
-                    "request_id": entry.get("request_id"),
-                    "username": entry.get("username"),
-                    "model": entry.get("model"),
-                    "total_tokens": entry.get("total_tokens"),
-                    "cost_eur": entry.get("cost_eur"),
-                    "status_code": entry.get("status_code"),
-                    # Dump JSON bodies to string so they fit in one CSV cell
-                    "request_body": json.dumps(entry.get("request_body"), ensure_ascii=False),
-                    "response_body": json.dumps(entry.get("response_body"), ensure_ascii=False),
-                }
-                rows.append(row)
-            except json.JSONDecodeError:
-                print(f"Skipping invalid JSON line in {file_path}")
+    try:
+        with open_func(file_path, mode, encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                try:
+                    entry = json.loads(line)
+                    
+                    # Decrypt specific fields if they exist
+                    if entry.get("request_body"):
+                        entry["request_body"] = decrypt_data(entry["request_body"], key_bytes)
+                    
+                    if entry.get("response_body"):
+                        entry["response_body"] = decrypt_data(entry["response_body"], key_bytes)
+
+                    # Flatten for CSV
+                    row = {
+                        "timestamp": entry.get("timestamp"),
+                        "request_id": entry.get("request_id"),
+                        "username": entry.get("username"),
+                        "model": entry.get("model"),
+                        "total_tokens": entry.get("total_tokens"),
+                        "cost_eur": entry.get("cost_eur"),
+                        "status_code": entry.get("status_code"),
+                        # Dump JSON bodies to string so they fit in one CSV cell
+                        "request_body": json.dumps(entry.get("request_body"), ensure_ascii=False),
+                        "response_body": json.dumps(entry.get("response_body"), ensure_ascii=False),
+                    }
+                    rows.append(row)
+                except json.JSONDecodeError:
+                    print(f"Skipping invalid JSON line in {file_path}")
+    except (gzip.BadGzipFile, IOError) as e:
+        print(f"Error reading file {file_path}: {e}")
                 
     return rows
 
@@ -101,7 +116,14 @@ def main():
     elif input_path.is_dir():
         for root, _, files in os.walk(input_path):
             for file in files:
-                if file.endswith(".jsonl"):
+                # Match files based on likely extensions
+                is_log_file = False
+                if COMPRESSION_ALGORITHM == "gzip":
+                    is_log_file = file.endswith(".jsonl.gz") or file.endswith(".jsonl")
+                else:
+                    is_log_file = file.endswith(".jsonl")
+
+                if is_log_file:
                     all_rows.extend(process_log_file(Path(root) / file, key_bytes))
     else:
         print(f"Input path not found: {input_path}")
